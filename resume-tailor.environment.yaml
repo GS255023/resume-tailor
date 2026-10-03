@@ -1,0 +1,7 @@
+name: resume-tailor-env
+description: Sandbox for the Resume Tailor agent. Needs internet for pip install and LinkedIn fetch.
+
+config:
+  type: cloud
+  networking:
+    type: unrestricted

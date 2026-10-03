@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Streamlit secrets — never commit
+.streamlit/secrets.toml
+
+# Local agent IDs
+.agent.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Outputs
+out/
+*.pdf
+*.docx
+
+# Local persistence (applied jobs cache)
+data/
