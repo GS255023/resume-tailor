@@ -13,7 +13,7 @@ import streamlit as st
 from europass_classic_renderer import build_pdf_classic, render_html_classic
 from europass_official_renderer import build_pdf_official, render_html_official
 from europass_renderer import build_pdf_europass, render_html_europass
-from generator import answer_job_questions, compute_coverage, generate_cover_letter, parse_resume_to_json, refine_resume, tailor_resume
+from generator import answer_job_questions, compute_coverage, generate_cover_letter, parse_resume_to_json, refine_resume, tailor_by_instructions, tailor_resume
 from jd_fetcher import (
     DATE_POSTED, EXPERIENCE_LEVEL, JOB_TYPE,
     fetch_jd, fetch_jd_by_id, search_linkedin_jobs,
@@ -585,7 +585,7 @@ def _publish_to_notion(entry: dict, target_id: str) -> tuple[bool, str]:
             resume_json=entry["resume"],
             resume_pdf=pdf_bytes,
             jd_url=job.get("url", ""),
-            coverage_pct=entry["coverage"]["composite_pct"],
+            coverage_pct=(entry.get("coverage") or {}).get("composite_pct"),
         )
         return True, page.get("url", "")
     except NotionError as e:
@@ -604,7 +604,7 @@ def _mark_applied(target_id: str):
         "role": entry.get("job", {}).get("title", ""),
         "company": entry.get("job", {}).get("company", ""),
         "url": entry.get("job", {}).get("url", ""),
-        "coverage_pct": entry["coverage"]["composite_pct"],
+        "coverage_pct": (entry.get("coverage") or {}).get("composite_pct"),
         "notion_url": "",
         "notion_error": "",
     }
@@ -674,11 +674,12 @@ def _render_download_and_apply(entry: dict, key_prefix: str, target_id: str):
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_search, tab_linkedin, tab_direct, tab_qa, tab_applied = st.tabs(
+tab_search, tab_linkedin, tab_direct, tab_instr, tab_qa, tab_applied = st.tabs(
     [
         " Search LinkedIn jobs ",
         " Tailor from LinkedIn URL ",
         " Tailor against any JD ",
+        " Tailor by instructions ",
         " Answer Job Questions ",
         f" Applied jobs ({len(st.session_state['applied'])}) ",
     ]
@@ -1139,6 +1140,81 @@ with tab_direct:
 
 
 # ===========================================================================
+# Mode — Tailor by instructions only (no JD)
+# ===========================================================================
+with tab_instr:
+    st.markdown(
+        '<div class="section-h">Tailor your resume using only your own instructions</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "No job description needed. Describe how you want your resume rewritten — "
+        "target direction, emphasis, tone, length, what to cut."
+    )
+    instr_text = st.text_area(
+        "Instructions",
+        height=220,
+        key="instr_text",
+        label_visibility="collapsed",
+        placeholder=(
+            "Examples:\n"
+            "• Position me for senior data engineering roles in fintech\n"
+            "• Emphasise cloud migration and cost-reduction work, with numbers\n"
+            "• Keep it to one page — max 4 bullets per role, drop roles older than 10 years\n"
+            "• Make the summary sound more senior and leadership-oriented\n"
+            "• Remove all mentions of SAP"
+        ),
+    )
+    instr_label = st.text_input(
+        "Label (optional, used in filename)",
+        key="instr_label", placeholder="e.g. Fintech Data Engineer",
+    )
+
+    if st.button("Tailor my resume", type="primary", use_container_width=True, key="instr_go"):
+        instructions = instr_text.strip()
+        if not instructions:
+            st.error("Write some instructions above first.")
+        else:
+            try:
+                with st.status("Tailoring...", expanded=True) as status:
+                    result = tailor_by_instructions(
+                        st.session_state["base_resume"], instructions,
+                        api_key=ANTHROPIC_API_KEY,
+                        mode=st.session_state.get("mode_value", "speed"),
+                        profile_override=_profile_override(),
+                        progress_cb=status.write,
+                    )
+                    status.update(label="Done — resume ready!", state="complete", expanded=False)
+                target_id = f"instr_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+                st.session_state["tailored"][target_id] = {
+                    **result, "jd": "", "instructions": instructions,
+                    "job": {
+                        "id": target_id,
+                        "title": instr_label.strip() or "(instruction-based)",
+                        "company": "", "location": "", "posted": "", "url": "",
+                    },
+                }
+                st.session_state["active_target_id"] = target_id
+            except Exception as e:
+                st.error(f"Tailoring failed: {e}")
+
+    instr_entries = [
+        (tid, e) for tid, e in st.session_state["tailored"].items()
+        if tid.startswith("instr_")
+    ]
+    for target_id, entry in reversed(instr_entries):
+        with st.container(border=True):
+            st.markdown(f"#### {entry['job'].get('title') or '(instruction-based)'}")
+            with st.expander("Instructions used", expanded=False):
+                st.text(entry.get("instructions", ""))
+            _render_download_and_apply(entry, key_prefix=f"dl_{target_id}",
+                                       target_id=target_id)
+            if st.button("View details", key=f"view_{target_id}",
+                         use_container_width=True):
+                st.session_state["active_target_id"] = target_id
+
+
+# ===========================================================================
 # Mode — Answer Job Questions
 # ===========================================================================
 with tab_qa:
@@ -1275,7 +1351,7 @@ with tab_applied:
                     st.markdown(f"**{rec.get('company') or '—'}**")
                     bits = [
                         f"Applied {rec.get('applied_at','')[:10]}" if rec.get("applied_at") else "",
-                        f"Coverage {rec.get('coverage_pct', '?')}%",
+                        f"Coverage {rec['coverage_pct']}%" if rec.get("coverage_pct") is not None else "",
                         f"[Original JD]({rec['url']})" if rec.get("url") else "",
                     ]
                     st.caption(" · ".join(b for b in bits if b))
@@ -1351,7 +1427,7 @@ active_id = st.session_state.get("active_target_id")
 if active_id and active_id in st.session_state["tailored"]:
     entry = st.session_state["tailored"][active_id]
     job_meta = entry.get("job", {})
-    coverage = entry["coverage"]
+    coverage = entry.get("coverage")
 
     st.markdown('<div class="section-h">Preview / refine active selection</div>',
                 unsafe_allow_html=True)
@@ -1359,6 +1435,19 @@ if active_id and active_id in st.session_state["tailored"]:
         f"**Target:** {job_meta.get('title')} @ {job_meta.get('company') or '—'}  "
         + (f"· [JD]({job_meta.get('url')})" if job_meta.get("url") else "")
     )
+
+    if not coverage:
+        # Instruction-only entries have no JD, so no keyword coverage to show.
+        st.caption("Tailored from your instructions only — no JD keyword coverage.")
+        t_prev, t_instr, t_json = st.tabs(["Preview", "Instructions", "Resume JSON"])
+        with t_prev:
+            _, html_preview = _build_pdf_and_html(entry["resume"])
+            st.components.v1.html(html_preview, height=1100, scrolling=True)
+        with t_instr:
+            st.text(entry.get("instructions", ""))
+        with t_json:
+            st.json(entry["resume"])
+        st.stop()
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Composite coverage", f"{coverage['composite_pct']}%")

@@ -673,6 +673,88 @@ def parse_resume_to_json(
 
 
 # ===========================================================================
+# Instruction-only tailoring (no JD)
+# ===========================================================================
+INSTRUCT_SYSTEM = """You rewrite a candidate's resume according to their own instructions.
+There is NO job description — the CANDIDATE_INSTRUCTIONS are the only target.
+
+Rules:
+- Follow the CANDIDATE_INSTRUCTIONS closely: emphasis, tone, length, target role or
+  industry, what to highlight, what to drop.
+- Keep the candidate's real history: real name, companies, roles, dates, education.
+  Do not invent companies, degrees, or certifications.
+- You may rewrite, reorder, merge, or add bullets, as long as they stay grounded in
+  the original resume.
+- Bullets start with a strong past-tense action verb, 1-2 lines each. Never start
+  with "Responsible for", "Worked on", "Helped with".
+- `title`: a professional headline matching the direction the instructions set.
+- `summary`: 3-5 sentences aligned with the instructions.
+- `experience[].sector`: business sector per role; infer if absent.
+- `languages`: {language, level, is_mother_tongue}; CEFR levels or "Native".
+- Use "" for any contact field not present.
+- Dates as "MM/YYYY", "Present" for ongoing roles. LinkedIn as "linkedin.com/in/handle".
+- No first person ("I", "my").
+
+Output the resume JSON only — no prose, no markdown."""
+
+
+def tailor_by_instructions(
+    resume_text: str,
+    instructions: str,
+    api_key: str | None = None,
+    mode: str = "speed",
+    profile_override: dict | None = None,
+    progress_cb=None,
+) -> dict:
+    """Rewrite the resume purely from free-text instructions (no JD, no coverage).
+
+    Returns:
+        {resume, mode}
+    """
+    def _emit(msg: str):
+        if progress_cb:
+            progress_cb(msg)
+
+    client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+    profile_block = ""
+    if profile_override:
+        profile_block = (
+            f"\n<PROFILE_OVERRIDE>\n{json.dumps(profile_override, indent=2)}\n"
+            "</PROFILE_OVERRIDE>\n"
+            "Use these values verbatim for name, contact and languages — they override "
+            "anything in the original resume.\n"
+        )
+    user = (
+        f"<ORIGINAL_RESUME>\n{resume_text}\n</ORIGINAL_RESUME>\n\n"
+        f"<CANDIDATE_INSTRUCTIONS>\n{instructions}\n</CANDIDATE_INSTRUCTIONS>\n"
+        f"{profile_block}\n"
+        "Produce the resume JSON now."
+    )
+    quality = mode == "quality"
+    kwargs: dict[str, Any] = {
+        "model": MODEL_QUALITY if quality else MODEL_SPEED,
+        "max_tokens": 16000,
+        "system": INSTRUCT_SYSTEM,
+        "output_config": {
+            "format": {"type": "json_schema", "schema": RESUME_SCHEMA},
+            "effort": "high" if quality else "medium",
+        },
+        "messages": [{"role": "user", "content": user}],
+    }
+    if quality:
+        kwargs["thinking"] = {"type": "adaptive"}
+
+    _emit("Rewriting resume from your instructions "
+          f"({'Opus 4.7' if quality else 'Sonnet 4.6'})...")
+    response = client.messages.create(**kwargs)
+    text = next((b.text for b in response.content if b.type == "text"), None)
+    if not text:
+        raise RuntimeError("Instruction-based rewrite returned no text.")
+    resume = _normalize_resume(_dedupe_skills(_ascii_clean(json.loads(text))))
+    return {"resume": resume, "mode": mode}
+
+
+# ===========================================================================
 # Job application Q&A
 # ===========================================================================
 QA_SYSTEM = """You answer job application screening questions on behalf of a candidate.
